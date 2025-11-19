@@ -2,10 +2,20 @@ from fastapi import FastAPI
 import subprocess
 import json
 import os
+from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 
 app = FastAPI()
 
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins (for testing)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ----------------------------------------------------------------------
 # Helper function to run shell commands
