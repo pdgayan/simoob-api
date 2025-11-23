@@ -1,350 +1,190 @@
+"""
+System Monitoring API
+A comprehensive FastAPI application for monitoring Docker containers, system resources,
+network metrics, logs, and advanced system statistics with historical data storage.
+
+Author: Simoob Team
+Version: 2.1
+"""
+
 from fastapi import FastAPI
-import subprocess
-import json
-import os
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+import logging
+import atexit
 
-app = FastAPI()
+# Import routers from modular structure
+from routers import system, containers, network, logs, advanced, history, analytics
 
+# Import database and collector modules
+from database import init_database, cleanup_old_data
+from collector import collect_all_metrics
 
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (for testing)
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# ----------------------------------------------------------------------
+# Logging Configuration
+# ----------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# ----------------------------------------------------------------------
+# FastAPI Application Setup
+# ----------------------------------------------------------------------
+
+app = FastAPI(
+    title="System Monitoring API",
+    description="Comprehensive monitoring API with historical data storage and analytics",
+    version="2.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
 # ----------------------------------------------------------------------
-# Helper function to run shell commands
+# CORS Middleware Configuration
 # ----------------------------------------------------------------------
-def run(cmd):
-    return subprocess.getoutput(cmd)
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins (configure appropriately for production)
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+)
 
 # ----------------------------------------------------------------------
-# 1. DOCKER CONTAINER INFORMATION
+# Database Initialization
 # ----------------------------------------------------------------------
 
-@app.get("/api/containers/detailed")
-def container_details():
-    cmd = 'docker ps --all --format "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}|{{.Size}}|{{.CreatedAt}}"'
-    output = run(cmd).strip().split("\n")
+@app.on_event("startup")
+def startup_event():
+    """Initialize database and start background tasks on application startup"""
+    logger.info("Initializing database...")
+    init_database()
+    logger.info("Database initialized successfully")
     
-
-    containers = []
-    for line in output:
-        if not line.strip():
-            continue
-        id, names, image, status, ports, size, createdAt = line.split("|")
-
-        containers.append({
-            "id": id.strip(),
-            "name": names.strip(),
-            "image": image.strip(),
-            "status": status.strip(),
-            "ports": ports.strip() or "No ports exposed",
-            "size": size.strip(),
-            "createdAt": createdAt.strip(),
-            "state": "running" if "Up" in status else "stopped",
-            "uptime": extract_uptime(status)
-        })
-
-    return containers
-
-
-@app.get("/api/containers/{name}/stats")
-def container_stats(name: str):
-    cmd = f'docker stats {name} --no-stream --format "{{{{.CPUPerc}}}}|{{{{.MemUsage}}}}|{{{{.NetIO}}}}|{{{{.BlockIO}}}}"'
-    cpu, memory, network, disk = run(cmd).split("|")
-
-    return {
-        "containerName": name,
-        "cpu": cpu.strip(),
-        "memory": memory.strip(),
-        "network": network.strip(),
-        "diskIO": disk.strip(),
-        "timestamp": now()
-    }
-
-
-@app.get("/api/containers/{name}/env")
-def container_env(name: str):
-    cmd = f"docker inspect {name} --format '{{{{range .Config.Env}}}}{{{{.}}}}\\n{{{{end}}}}'"
-    output = run(cmd).strip().split("\n")
-
-    env_vars = []
-    for line in output:
-        if "=" in line:
-            key, value = line.split("=", 1)
-            env_vars.append({"key": key, "value": value})
-
-    return {"containerName": name, "environment": env_vars}
-
+    # Start background scheduler for metrics collection
+    logger.info("Starting background metrics collector...")
+    scheduler = BackgroundScheduler()
+    
+    # Collect metrics every 5 minutes
+    scheduler.add_job(
+        func=collect_all_metrics,
+        trigger=IntervalTrigger(minutes=5),
+        id='collect_metrics',
+        name='Collect system metrics',
+        replace_existing=True
+    )
+    
+    # Clean up old data daily (remove data older than 30 days)
+    scheduler.add_job(
+        func=cleanup_old_data,
+        trigger=IntervalTrigger(hours=24),
+        id='cleanup_data',
+        name='Cleanup old metrics data',
+        replace_existing=True,
+        kwargs={'days_to_keep': 30}
+    )
+    
+    scheduler.start()
+    logger.info("Background scheduler started successfully")
+    
+    # Ensure scheduler shuts down on exit
+    atexit.register(lambda: scheduler.shutdown())
+    
+    # Collect initial metrics immediately
+    try:
+        logger.info("Collecting initial metrics...")
+        collect_all_metrics()
+        logger.info("Initial metrics collection completed")
+    except Exception as e:
+        logger.error(f"Error collecting initial metrics: {e}")
 
 # ----------------------------------------------------------------------
-# 2. SYSTEM STATS
+# Register Routers
 # ----------------------------------------------------------------------
 
-@app.get("/api/system/stats")
-def system_stats():
-    disk = run("df -h /")
-    memory = run("free -h")
-    uptime = run("uptime")
-    uname = run("uname -a")
-    cpu_model = run("cat /proc/cpuinfo | grep 'model name' | head -1")
-    core_count = run("nproc")
-    os_name = run('cat /etc/os-release | grep PRETTY_NAME').split("=")[1].replace('"', '')
+# System-level metrics router
+app.include_router(system.router)
 
-    # Parse disk
-    disk_line = [line for line in disk.split("\n") if "/dev/" in line or "overlay" in line]
-    if disk_line:
-        parts = disk_line[0].split()
-        disk_stats = {
-            "filesystem": parts[0],
-            "total": parts[1],
-            "used": parts[2],
-            "available": parts[3],
-            "percent": parts[4],
-        }
-    else:
-        disk_stats = {}
+# Container-level metrics router
+app.include_router(containers.router)
 
-    # Parse memory
-    mem_line = [l for l in memory.split("\n") if "Mem:" in l]
-    if mem_line:
-        parts = mem_line[0].split()
-        memory_stats = {
-            "total": parts[1],
-            "used": parts[2],
-            "free": parts[3],
-            "available": parts[6] if len(parts) >= 7 else parts[3]
-        }
-    else:
-        memory_stats = {}
+# Network-level metrics router
+app.include_router(network.router)
 
-    # Parse load average
-    import re
-    load = re.findall(r"load average: ([\d.]+), ([\d.]+), ([\d.]+)", uptime)
-    load_avg = None
-    if load:
-        load_avg = {
-            "1min": float(load[0][0]),
-            "5min": float(load[0][1]),
-            "15min": float(load[0][2]),
-        }
+# Logs and events router
+app.include_router(logs.router)
 
-    # Uptime
-    up = re.findall(r"up (.*?),", uptime)
-    uptime_str = up[0] if up else "Unknown"
+# Advanced metrics router
+app.include_router(advanced.router)
 
+# Historical data query router
+app.include_router(history.router)
+
+# Analytics and trends router
+app.include_router(analytics.router)
+
+# ----------------------------------------------------------------------
+# Root Endpoint
+# ----------------------------------------------------------------------
+
+@app.get("/")
+def read_root():
+    """
+    API root endpoint with welcome message and available routes.
+    """
     return {
-        "disk": disk_stats,
-        "memory": memory_stats,
-        "uptime": uptime_str,
-        "loadAverage": load_avg,
-        "cpu": {
-            "model": cpu_model.split(":")[1].strip() if ":" in cpu_model else cpu_model,
-            "cores": core_count
+        "message": "System Monitoring API v2.1 with Historical Data Storage",
+        "documentation": "/docs",
+        "redoc": "/redoc",
+        "categories": {
+            "system": "/api/system/* - Real-time system metrics",
+            "containers": "/api/containers/* - Docker container management",
+            "network": "/api/network/* - Network monitoring",
+            "logs": "/api/logs/* - Log aggregation and search",
+            "advanced": "/api/advanced/* - Advanced metrics and alerts",
+            "history": "/api/history/* - Historical data queries",
+            "analytics": "/api/analytics/* - Trend analysis and forecasting"
         },
-        "os": os_name,
-        "hostname": uname.split()[1],
-        "timestamp": now()
+        "features": [
+            "Real-time system monitoring",
+            "Docker container management",
+            "Network traffic analysis",
+            "Log aggregation and search",
+            "Advanced metrics and alerts",
+            "Prometheus metrics export",
+            "Historical data storage (SQLite)",
+            "Automated metrics collection",
+            "Trend analysis and forecasting",
+            "Capacity planning"
+        ],
+        "database": {
+            "location": "data/monitoring.db",
+            "collection_interval": "5 minutes",
+            "retention_period": "30 days"
+        }
     }
 
 
-@app.get("/api/system/cpu")
-def cpu_usage():
-    cpus = os.cpu_count()
-    stat1 = open("/proc/stat").readline().split()[1:]
-    idle1 = int(stat1[3])
-    total1 = sum(map(int, stat1))
-
-    import time
-    time.sleep(0.1)
-
-    stat2 = open("/proc/stat").readline().split()[1:]
-    idle2 = int(stat2[3])
-    total2 = sum(map(int, stat2))
-
-    cpu_usage = (1 - (idle2 - idle1) / (total2 - total1)) * 100
-
-    return {"cpuUsage": round(cpu_usage, 1), "timestamp": now()}
+@app.get("/health")
+def health_check():
+    """
+    Health check endpoint for monitoring API availability.
+    """
+    return {"status": "healthy", "service": "System Monitoring API", "version": "2.1.0"}
 
 
 # ----------------------------------------------------------------------
-# 3. DOCKER IMAGES
+# Application Startup
 # ----------------------------------------------------------------------
-
-@app.get("/api/images")
-def images():
-    cmd = 'docker images --format "{{.Repository}}|{{.Tag}}|{{.ID}}|{{.CreatedSince}}|{{.Size}}"'
-    output = run(cmd).strip().split("\n")
-
-    images = []
-    for line in output:
-        repo, tag, id, created, size = line.split("|")
-        images.append({
-            "repository": repo,
-            "tag": tag,
-            "id": id,
-            "createdSince": created,
-            "size": size,
-            "fullName": f"{repo}:{tag}"
-        })
-
-    return images
-
-
-# ----------------------------------------------------------------------
-# 4. NETWORK
-# ----------------------------------------------------------------------
-
-@app.get("/api/networks")
-def networks():
-    cmd = 'docker network ls --format "{{.ID}}|{{.Name}}|{{.Driver}}|{{.Scope}}"'
-    output = run(cmd).strip().split("\n")
-
-    networks = []
-    for line in output:
-        id, name, driver, scope = line.split("|")
-        networks.append({
-            "id": id,
-            "name": name,
-            "driver": driver,
-            "scope": scope
-        })
-
-    return networks
-
-
-@app.get("/api/system/network")
-def system_network():
-    output = run('ip addr show | grep -E "inet |UP|DOWN"')
-    return {"interfaces": output, "timestamp": now()}
-
-
-# ----------------------------------------------------------------------
-# 5. LOGS
-# ----------------------------------------------------------------------
-
-@app.get("/api/system/logs")
-def system_logs(lines: int = 50):
-    output = run(f"journalctl -n {lines} --no-pager").split("\n")
-    return {"logs": output, "count": len(output), "timestamp": now()}
-
-
-@app.get("/api/docker/logs")
-def docker_logs():
-    output = run("journalctl -u docker --no-pager -n 50").split("\n")
-    return {"service": "docker", "logs": output, "count": len(output), "timestamp": now()}
-
-
-# ----------------------------------------------------------------------
-# 6. PROCESSES
-# ----------------------------------------------------------------------
-
-@app.get("/api/system/processes")
-def processes():
-    output = run("ps aux --sort=-%cpu | head -20").split("\n")
-    header = output[0].split()
-
-    proc_list = []
-    for line in output[1:]:
-        parts = line.split()
-        if len(parts) < 11:
-            continue
-        proc_list.append({
-            "user": parts[0],
-            "pid": parts[1],
-            "cpu": parts[2],
-            "memory": parts[3],
-            "command": " ".join(parts[10:])
-        })
-
-    return {"processes": proc_list, "timestamp": now()}
-
-
-# ----------------------------------------------------------------------
-# 7. SERVICE STATUS
-# ----------------------------------------------------------------------
-
-@app.get("/api/services/status")
-def services_status():
-    services = ["docker", "nginx", "mysql", "ssh"]
-    result = []
-
-    for svc in services:
-        status = run(f"systemctl is-active {svc}")
-        result.append({
-            "name": svc,
-            "status": status,
-            "active": status == "active"
-        })
-
-    return {"services": result, "timestamp": now()}
-
-
-# ----------------------------------------------------------------------
-# 8. DISK USAGE
-# ----------------------------------------------------------------------
-
-@app.get("/api/system/disk-usage")
-def disk_usage():
-    output = run("du -sh /var/lib/docker /home /tmp /var/log 2>/dev/null | sort -hr").split("\n")
-
-    dirs = []
-    for line in output:
-        if not line.strip():
-            continue
-        size, path = line.split("\t")
-        dirs.append({"size": size, "path": path})
-
-    return {"directories": dirs, "timestamp": now()}
-
-
-# ----------------------------------------------------------------------
-# 9. PORTS
-# ----------------------------------------------------------------------
-
-@app.get("/api/system/ports")
-def ports():
-    output = run('ss -tuln | grep LISTEN').split("\n")
-
-    ports = []
-    for line in output:
-        parts = line.split()
-        if len(parts) >= 5:
-            ports.append({
-                "protocol": parts[0],
-                "localAddress": parts[4],
-                "state": parts[1]
-            })
-
-    return {"openPorts": ports, "timestamp": now()}
-
-
-# ----------------------------------------------------------------------
-# Helper Functions
-# ----------------------------------------------------------------------
-
-def extract_uptime(status):
-    import re
-    if "Up" in status:
-        match = re.search(r"Up (.+?)(?:\(|$)", status)
-        return match.group(1).strip() if match else "Running"
-    return "Stopped"
-
-
-def now():
-    return datetime.utcnow().isoformat()
-
-
-# ----------------------------------------------------------------------
-# RUN COMMAND (same as Node's app.listen)
-# ----------------------------------------------------------------------
-# Start with:
-#   uvicorn main:app --reload --port 3001
+# To run this application:
+#   uvicorn api:app --reload --port 3001 --host 0.0.0.0
+# 
+# For production:
+#   uvicorn api:app --port 3001 --host 0.0.0.0 --workers 4
+#
+# Database will be automatically initialized on first startup.
+# Metrics are collected every 5 minutes in the background.
 # ----------------------------------------------------------------------

@@ -1,2 +1,13 @@
-fastapi
-uvicorn[standard]
+# Core FastAPI dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# Database and ORM
+SQLAlchemy>=2.0.0
+
+# Background task scheduling
+APScheduler>=3.10.0
+
+# Additional utilities
+python-multipart>=0.0.6
+pydantic>=2.0.0
