@@ -130,7 +130,7 @@ class AlertHistory(Base):
     
     # Additional context
     resource_name = Column(String, nullable=True)  # e.g., container name
-    metadata = Column(JSON, nullable=True)
+    extra_data = Column(JSON, nullable=True)  # Additional metadata (renamed from 'metadata' to avoid SQLAlchemy reserved word)
 
 
 class ContainerEvent(Base):
@@ -152,9 +152,9 @@ class ContainerEvent(Base):
     status = Column(String)  # success, failed
     error_message = Column(Text, nullable=True)
     
-    # Metadata
+    # Additional info
     triggered_by = Column(String, nullable=True)  # API, user, system
-    metadata = Column(JSON, nullable=True)
+    extra_data = Column(JSON, nullable=True)  # Additional metadata (renamed from 'metadata' to avoid SQLAlchemy reserved word)
 
 
 class ApiAccessLog(Base):
